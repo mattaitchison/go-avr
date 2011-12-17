@@ -3,8 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"http"
 	"log"
+	"net/http"
 
 	"go-avr.googlecode.com/git/avr"
 )

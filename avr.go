@@ -12,9 +12,10 @@ package avr
 
 import (
 	"bufio"
+	"errors"
 	"log"
 	"net"
-	"os"
+	"strings"
 	"sync"
 )
 
@@ -26,7 +27,7 @@ func New(addr string) *Amp {
 		addr:     addr,
 		reqc:     make(chan request),
 		ampc:     make(chan *ampLine),
-		connerrc: make(chan os.Error),
+		connerrc: make(chan error),
 	}
 	a.startConnect()
 	go a.loop()
@@ -39,15 +40,15 @@ type Amp struct {
 	addr     string
 	reqc     chan request
 	ampc     chan *ampLine
-	connerrc chan os.Error
+	connerrc chan error
 
 	// Guarded by mu:
 	mu             sync.Mutex
 	closed         bool
 	state          state
-	stateListeners []chan os.Error // nil for connected
+	stateListeners []chan error // nil for connected
 	conn           *conn
-	err            os.Error
+	err            error
 }
 
 func (a *Amp) Close() {
@@ -63,10 +64,18 @@ func (a *Amp) Close() {
 	}
 }
 
-func (a *Amp) Ping() os.Error {
+func (a *Amp) Ping() error {
 	a.startConnect() // no-op if already connected/connecting
 	ch := make(chan *response)
 	a.reqc <- request{ch: ch, cmd: pingCmd}
+	res := <-ch
+	return res.err
+}
+
+func (a *Amp) SendCommand(cmd string) error {
+	a.startConnect() // no-op if already connected/connecting
+	ch := make(chan *response)
+	a.reqc <- request{ch: ch, cmd: rawCmd, raw: cmd}
 	res := <-ch
 	return res.err
 }
@@ -82,7 +91,7 @@ func (a *Amp) startConnect() {
 }
 
 // must be called with mu held
-func (a *Amp) setState(err os.Error) {
+func (a *Amp) setState(err error) {
 	if err == nil {
 		a.state = connected
 	} else {
@@ -95,7 +104,7 @@ func (a *Amp) setState(err os.Error) {
 	a.stateListeners = nil
 }
 
-func (a *Amp) addStateListener(ch chan os.Error) {
+func (a *Amp) addStateListener(ch chan error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.state == connecting {
@@ -119,6 +128,7 @@ func (a *Amp) connect() {
 		a:    a,
 		c:    c,
 		bufr: bufio.NewReader(c),
+		bufw: bufio.NewWriter(c),
 	}
 	go a.conn.readFromAmp()
 }
@@ -144,6 +154,8 @@ func (a *Amp) handleRequest(req request) {
 	switch req.cmd {
 	case pingCmd:
 		a.handlePing(req)
+	case rawCmd:
+		a.handleRaw(req)
 	default:
 		log.Printf("unhandled command request: %#v", req)
 	}
@@ -160,10 +172,31 @@ func (a *Amp) handlePing(req request) {
 	}
 
 	a.startConnect()
-	ch := make(chan os.Error)
+	ch := make(chan error)
 	a.addStateListener(ch)
 
 	req.ch <- &response{err: <-ch}
+}
+
+// run in loop goroutine
+func (a *Amp) handleRaw(req request) {
+	a.mu.Lock()
+	st := a.state
+	conn := a.conn
+	a.mu.Unlock()
+
+	if st != connected {
+		req.ch <- &response{err: errors.New("not connected")}
+		return
+	}
+
+	raw := req.raw
+	if !strings.HasSuffix(raw, "\r") {
+		raw += "\r"
+	}
+	conn.bufw.WriteString(raw)
+	conn.bufw.Flush()
+	req.ch <- &response{err: nil}
 }
 
 // conn is a single TCP connection to an AVR. If it fails, the
@@ -173,6 +206,7 @@ type conn struct {
 	a    *Amp
 	c    net.Conn
 	bufr *bufio.Reader
+	bufw *bufio.Writer
 }
 
 type state int
@@ -187,15 +221,19 @@ type command int
 
 const (
 	pingCmd command = iota
+	rawCmd
 )
 
 type request struct {
 	ch  chan *response
 	cmd command
+
+	// If rawCmd
+	raw string
 }
 
 type response struct {
-	err os.Error // for ping
+	err error // for ping
 }
 
 func (c *conn) readFromAmp() {
