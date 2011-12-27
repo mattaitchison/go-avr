@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"go-avr.googlecode.com/git/avr"
+	"code.google.com/p/go-avr/avr"
 )
 
 // Flags
