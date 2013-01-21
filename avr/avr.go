@@ -51,17 +51,23 @@ type Amp struct {
 	err            error
 }
 
-func (a *Amp) Close() {
+// Addr returns the address of the amp.
+func (a *Amp) Addr() string {
+	return a.addr
+}
+
+func (a *Amp) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
-		return
+		return nil
 	}
 	a.closed = true
 	close(a.reqc)
 	if a.conn != nil {
 		a.conn.c.Close()
 	}
+	return nil
 }
 
 func (a *Amp) Ping() error {
